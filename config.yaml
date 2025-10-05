@@ -1,0 +1,38 @@
+# config.yaml (VERSÃO OTIMIZADA PARA TESTES)
+risk:
+  risk_per_trade: 0.02          # 2% do capital por trade
+  max_daily_trades: 5           # Reduzido para testes
+  daily_loss_limit: -50         # Limite mais conservador
+  cooldown_period: 10           # Cooldown menor para testes
+  max_position_value: 100       # Aumentado para evitar erros de notional
+  min_position_value: 25        # Aumentado para evitar erros de quantidade
+
+trading:
+  enabled_pairs:
+    - "BTC/USDT"
+    - "ETH/USDT" 
+    - "ADA/USDT"
+  strategy: "mean_reversion"
+  analysis_interval: 30         # Intervalo menor para testes rápidos
+  max_open_positions: 2         # Limite conservador
+
+exchange:
+  name: "binance"
+  api_key: "bqLNegabmTC39CWLUfeFxzKhKhzKjMSYHMXOzvJQsOVfB8vhX7zBfZ27TieVDmok"           # Placeholder para sandbox
+  secret: "gRyAGe7kHOQx3XzcOL2UVe3KdN6iU7CiJf9dfC6wfB9sE05ipeE9E9RY9RbRYmal"         # Placeholder para sandbox
+  sandbox: true                 # Modo sandbox ativado
+  order_timeout: 10             # Timeout menor
+
+logging:
+  level: "INFO"
+  file: "trading_bot.log"
+
+# Configurações específicas para análise técnica
+technical:
+  rsi_period: 14
+  macd_fast: 12
+  macd_slow: 26  
+  macd_signal: 9
+  bollinger_period: 20
+  bollinger_std: 2
+  volume_ma_period: 20
