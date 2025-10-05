@@ -204,7 +204,120 @@ class RiskManager:
         except Exception as e:
             self.logger.error(f"❌ Erro registrando treinamento RL: {e}")
 
-    # ... (mantenha o resto dos métodos existentes: _calculate_proper_position, etc.)
+    async def _calculate_proper_position(self, market, signal, trader):
+        """Calcula posição que atende aos requisitos NOTIONAL - CORRIGIDO"""
+        try:
+            symbol = market['symbol']
+            balance = await trader.get_account_balance()
+            usdt_balance = balance.get('USDT', 1000)
+            current_price = market['current_price']
+
+            # VALORES MAIORES para atender NOTIONAL
+            risk_amount = usdt_balance * self.config['risk_per_trade']
+
+            # Garante NOTIONAL mínimo de $20
+            trade_value = max(risk_amount, self.min_position_value)
+
+            # Limita pelo máximo
+            trade_value = min(trade_value, self.max_position_value)
+
+            # Quantidade baseada no valor
+            quantity = trade_value / current_price
+
+            # Verifica tamanho mínimo do lote - VALORES CORRIGIDOS
+            min_qty = await self._get_minimum_quantity(symbol)
+            if quantity < min_qty:
+                self.logger.warning(f"📏 Quantidade {quantity:.6f} abaixo do mínimo {min_qty:.6f} para {symbol}")
+                # Ajusta para o mínimo
+                quantity = min_qty
+                # Recalcula o valor do trade
+                trade_value = quantity * current_price
+                
+                # Verifica se ainda atende ao mínimo notional
+                if trade_value < self.min_position_value:
+                    self.logger.warning(f"💰 Valor ajustado ${trade_value:.2f} ainda abaixo do mínimo ${self.min_position_value}")
+                    return 0
+
+            # Verifica notional mínimo
+            min_notional = self.min_position_value
+            if trade_value < min_notional:
+                self.logger.warning(f"💰 Valor do trade ${trade_value:.2f} abaixo do mínimo notional ${min_notional}")
+                return 0
+
+            # Verifica saldo para compras
+            if signal['action'] == 'buy':
+                max_affordable = (usdt_balance * 0.95) / current_price  # 5% de margem de segurança
+                quantity = min(quantity, max_affordable)
+
+            self.logger.info(f"💰 Cálculo posição: Balanço=${usdt_balance:.2f}, "
+                           f"Valor=${trade_value:.2f}, Qtd={quantity:.6f}, "
+                           f"Mín.Qtd={min_qty:.6f}")
+
+            return quantity
+
+        except Exception as e:
+            self.logger.error(f"❌ Erro calculando posição: {e}")
+            return 0
+
+    async def _get_minimum_quantity(self, symbol):
+        """Obtém quantidade mínima permitida para o símbolo - VALORES CORRIGIDOS"""
+        # Valores mínimos realistas para Binance
+        min_quantities = {
+            'BTC/USDT': 0.00001,   # 0.00001 BTC
+            'ETH/USDT': 0.0001,    # 0.0001 ETH
+            'ADA/USDT': 1.0,       # 1 ADA
+            'BNB/USDT': 0.001,     # 0.001 BNB
+            'XRP/USDT': 1.0,       # 1 XRP
+            'DOT/USDT': 0.1,       # 0.1 DOT
+            'LINK/USDT': 0.01,     # 0.01 LINK
+            'LTC/USDT': 0.001,     # 0.001 LTC
+            'BCH/USDT': 0.001,     # 0.001 BCH
+            'EOS/USDT': 0.1,       # 0.1 EOS
+        }
+        
+        # Tenta diferentes formatos do símbolo
+        for sym_format in [symbol, symbol.replace('/', ''), symbol.replace('/', '') + 'T']:
+            if sym_format in min_quantities:
+                return min_quantities[sym_format]
+        
+        # Default mais conservador
+        return 0.001
+
+    def _log_trade_metrics(self):
+        """Loga métricas atuais de trading"""
+        self.logger.info(f"📊 Métricas: Trades Hoje={self.daily_trades}/"
+                        f"{self.config['max_daily_trades']}, "
+                        f"Total Trades={self.total_trades}, "
+                        f"PnL Diário=${self.daily_pnl:.2f}")
+
+    def show_portfolio_status(self):
+        """Mostra status completo do portfólio"""
+        self.logger.info("📈 Status do Portfólio:")
+        self.profit_tracker.show_current_status()
+        self._log_trade_metrics()
+
+    def _reset_daily_counters(self):
+        """Reseta contadores diários"""
+        now = datetime.now()
+        if now.date() > self.last_reset.date():
+            self.daily_trades = 0
+            self.daily_pnl = 0
+            self.last_reset = now
+            self.logger.info("🔄 Contadores diários resetados")
+
+    async def can_trade(self):
+        """Verifica se pode executar novos trades"""
+        self._reset_daily_counters()
+
+        if self.daily_trades >= self.config['max_daily_trades']:
+            self.logger.warning("⏸️ Limite diário de trades atingido")
+            return False
+
+        if self.daily_pnl <= self.config['daily_loss_limit']:
+            self.logger.warning("⏸️ Limite diário de perda atingido")
+            return False
+
+        return True
 
     async def get_risk_report(self):
         """Gera relatório completo de risco incluindo RL"""
