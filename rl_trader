@@ -7,7 +7,7 @@ import random
 from typing import Dict, List, Tuple
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, LSTM, Dropout
+from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 
 
@@ -51,21 +51,32 @@ class RLTrader:
 
     def _build_model(self) -> Sequential:
         """Constrói a rede neural Deep Q-Learning"""
-        model = Sequential([
-            Dense(128, input_dim=self.state_size, activation='relu'),
-            Dropout(0.3),
-            Dense(64, activation='relu'),
-            Dropout(0.2),
-            Dense(32, activation='relu'),
-            Dense(3, activation='linear')  # 3 ações: BUY, SELL, HOLD
-        ])
-        
-        model.compile(
-            loss='mse',
-            optimizer=Adam(learning_rate=self.learning_rate)
-        )
-        
-        return model
+        try:
+            model = Sequential([
+                Dense(128, input_dim=self.state_size, activation='relu'),
+                Dropout(0.3),
+                Dense(64, activation='relu'),
+                Dropout(0.2),
+                Dense(32, activation='relu'),
+                Dense(3, activation='linear')  # 3 ações: BUY=0, SELL=1, HOLD=2
+            ])
+            
+            model.compile(
+                loss='mse',
+                optimizer=Adam(learning_rate=self.learning_rate)
+            )
+            
+            return model
+        except Exception as e:
+            self.logger.error(f"❌ Erro construindo modelo: {e}")
+            # Fallback para modelo simples
+            model = Sequential([
+                Dense(24, input_dim=self.state_size, activation='relu'),
+                Dense(24, activation='relu'),
+                Dense(3, activation='linear')
+            ])
+            model.compile(loss='mse', optimizer=Adam(learning_rate=0.001))
+            return model
 
     def update_target_model(self):
         """Atualiza o modelo alvo (target network)"""
@@ -74,25 +85,35 @@ class RLTrader:
     def _create_state(self, market_data: Dict, portfolio: Dict) -> np.ndarray:
         """Cria o estado atual para o RL"""
         try:
-            # Features do mercado
+            # Features do mercado (normalizadas)
+            rsi = market_data.get('rsi', 50)
+            macd = market_data.get('macd', 0)
+            macd_hist = market_data.get('macd_histogram', 0)
+            bb_pos = market_data.get('bb_position', 0.5)
+            volume_ratio = market_data.get('volume_ratio', 1)
+            volatility = market_data.get('volatility', 0.1)
+            trend_strength = market_data.get('trend_strength', 0.5)
+            
+            # Features do portfólio
+            cash_ratio = portfolio.get('cash_ratio', 0.5)
+            position_size = portfolio.get('position_size', 0)
+            current_pnl = portfolio.get('current_pnl', 0)
+            
+            # Normalização
             features = [
-                market_data.get('rsi', 50) / 100,  # Normalizado
-                market_data.get('macd', 0),
-                market_data.get('macd_histogram', 0),
-                market_data.get('bb_position', 0.5),
-                market_data.get('volume_ratio', 1),
-                market_data.get('volatility', 0.1) * 10,
-                market_data.get('trend_strength', 0.5),
-                portfolio.get('cash_ratio', 0.5),
-                portfolio.get('position_size', 0),
-                portfolio.get('current_pnl', 0) / 100  # Normalizado
+                rsi / 100.0,                           # 0-1
+                np.tanh(macd * 10),                    # Normalizado
+                np.tanh(macd_hist * 100),              # Normalizado  
+                bb_pos,                                # Já normalizado
+                min(volume_ratio / 3.0, 1.0),          # Limitado a 0-1
+                min(volatility * 10, 1.0),             # Limitado a 0-1
+                trend_strength,                        # Já normalizado
+                cash_ratio,                            # Já normalizado
+                min(position_size / 5.0, 1.0),         # Limitado a 0-1
+                np.tanh(current_pnl / 100.0)           # Normalizado
             ]
             
-            # Garante que temos exatamente state_size features
-            while len(features) < self.state_size:
-                features.append(0.0)
-            
-            return np.array(features[:self.state_size]).reshape(1, -1)
+            return np.array(features).reshape(1, -1)
             
         except Exception as e:
             self.logger.error(f"❌ Erro criando estado: {e}")
@@ -100,13 +121,17 @@ class RLTrader:
 
     def choose_action(self, state: np.ndarray) -> int:
         """Escolhe ação usando política ε-greedy"""
-        if np.random.rand() <= self.epsilon and self.enable_training:
-            # Exploração: ação aleatória
-            return random.randrange(3)
-        
-        # Exploração: melhor ação prevista
-        act_values = self.model.predict(state, verbose=0)
-        return np.argmax(act_values[0])
+        try:
+            if np.random.rand() <= self.epsilon and self.enable_training:
+                # Exploração: ação aleatória
+                return random.randrange(3)
+            
+            # Exploração: melhor ação prevista
+            act_values = self.model.predict(state, verbose=0)
+            return np.argmax(act_values[0])
+        except Exception as e:
+            self.logger.error(f"❌ Erro escolhendo ação: {e}")
+            return 2  # Fallback para HOLD
 
     def remember(self, state: np.ndarray, action: int, reward: float, 
                 next_state: np.ndarray, done: bool):
@@ -118,60 +143,85 @@ class RLTrader:
         if len(self.memory) < self.batch_size:
             return
 
-        # Amostra batch aleatório
-        minibatch = random.sample(self.memory, self.batch_size)
-        
-        states = np.array([experience[0][0] for experience in minibatch])
-        next_states = np.array([experience[3][0] for experience in minibatch])
-        
-        # Previsões atuais e futuras
-        current_q = self.model.predict(states, verbose=0)
-        next_q = self.target_model.predict(next_states, verbose=0)
-        
-        # Atualiza Q-values
-        for i, (state, action, reward, next_state, done) in enumerate(minibatch):
-            if done:
-                target = reward
-            else:
-                target = reward + self.gamma * np.amax(next_q[i])
+        try:
+            # Amostra batch aleatório
+            minibatch = random.sample(self.memory, self.batch_size)
             
-            current_q[i][action] = target
-        
-        # Treina o modelo
-        self.model.fit(states, current_q, epochs=1, verbose=0, batch_size=self.batch_size)
-        
-        # Decai epsilon
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
+            states = np.array([experience[0][0] for experience in minibatch])
+            next_states = np.array([experience[3][0] for experience in minibatch])
+            
+            # Previsões atuais e futuras
+            current_q = self.model.predict(states, verbose=0)
+            next_q = self.target_model.predict(next_states, verbose=0)
+            
+            # Atualiza Q-values
+            for i, (state, action, reward, next_state, done) in enumerate(minibatch):
+                if done:
+                    target = reward
+                else:
+                    target = reward + self.gamma * np.amax(next_q[i])
+                
+                current_q[i][action] = target
+            
+            # Treina o modelo
+            self.model.fit(states, current_q, epochs=1, verbose=0, batch_size=self.batch_size)
+            
+            # Decai epsilon
+            if self.epsilon > self.epsilon_min:
+                self.epsilon *= self.epsilon_decay
+                
+        except Exception as e:
+            self.logger.error(f"❌ Erro no replay: {e}")
 
-    def calculate_reward(self, action: int, pnl: float, market_conditions: Dict) -> float:
+    def calculate_reward(self, action: int, pnl: float, market_conditions: Dict, 
+                        holding_period: float = 1.0) -> float:
         """Calcula recompensa baseada no resultado do trade"""
-        reward = 0.0
-        
-        # Recompensa/Punição baseada no P&L
-        reward += pnl * 10  # Escala o P&L
-        
-        # Recompensas adicionais baseadas em condições de mercado
-        if action == 0:  # BUY
-            if market_conditions.get('trend', 'NEUTRAL') == 'UPTREND':
-                reward += 0.1
-            elif market_conditions.get('rsi', 50) < 30:  # RSI oversold
-                reward += 0.2
-                
-        elif action == 1:  # SELL
-            if market_conditions.get('trend', 'NEUTRAL') == 'DOWNTREND':
-                reward += 0.1
-            elif market_conditions.get('rsi', 50) > 70:  # RSI overbought
-                reward += 0.2
-                
-        elif action == 2:  # HOLD
-            if market_conditions.get('volatility', 0) > 0.05:  # Alta volatilidade
-                reward += 0.1
-        
-        # Punição por ações muito frequentes
-        reward -= 0.01  # Pequena punição por qualquer ação
-        
-        return reward
+        try:
+            reward = 0.0
+            
+            # Recompensa/Punição baseada no P&L (principal)
+            reward += pnl * 20  # Escala o P&L
+            
+            # Recompensas estratégicas baseadas em condições de mercado
+            rsi = market_conditions.get('rsi', 50)
+            trend = market_conditions.get('trend', 'NEUTRAL')
+            volatility = market_conditions.get('volatility', 0.02)
+            
+            if action == 0:  # BUY
+                if trend == 'UPTREND':
+                    reward += 0.2
+                if rsi < 35:  # RSI oversold
+                    reward += 0.3
+                if volatility < 0.05:  # Baixa volatilidade
+                    reward += 0.1
+                    
+            elif action == 1:  # SELL  
+                if trend == 'DOWNTREND':
+                    reward += 0.2
+                if rsi > 65:  # RSI overbought
+                    reward += 0.3
+                if volatility > 0.08:  # Alta volatilidade
+                    reward += 0.1
+                    
+            elif action == 2:  # HOLD
+                if volatility > 0.1:  # Muita volatilidade
+                    reward += 0.2
+                if abs(pnl) > 0.05:  # P&L significativo em posição aberta
+                    reward += pnl * 10
+            
+            # Punição por ações muito frequentes
+            reward -= 0.05
+            
+            # Recompensa por holding period ótimo
+            optimal_hold = 4.0  # 4 horas
+            hold_bonus = 1.0 - min(abs(holding_period - optimal_hold) / optimal_hold, 1.0)
+            reward += hold_bonus * 0.1
+            
+            return float(reward)
+            
+        except Exception as e:
+            self.logger.error(f"❌ Erro calculando recompensa: {e}")
+            return pnl * 10  # Fallback para recompensa baseada apenas no P&L
 
     async def get_trading_signal(self, market_data: Dict, portfolio: Dict, 
                                symbol: str) -> Dict:
@@ -187,15 +237,16 @@ class RLTrader:
             action_map = {
                 0: {'action': 'buy', 'type': 'RL_BUY', 'strength': 0.8},
                 1: {'action': 'sell', 'type': 'RL_SELL', 'strength': 0.8},
-                2: {'action': 'hold', 'type': 'RL_HOLD', 'strength': 0.5}
+                2: {'action': 'hold', 'type': 'RL_HOLD', 'strength': 0.3}
             }
             
             signal = action_map[action]
             signal['rl_state'] = state.tolist()
             signal['epsilon'] = self.epsilon
+            signal['q_values'] = self.model.predict(state, verbose=0)[0].tolist()
             
-            self.logger.info(f"🎯 Sinal RL: {symbol} {signal['action'].upper()} "
-                           f"(ε={self.epsilon:.3f})")
+            self.logger.info(f"🎯 Sinal RL {symbol}: {signal['action'].upper()} "
+                           f"(ε={self.epsilon:.3f}, Q={signal['q_values']})")
             
             return signal
             
@@ -203,18 +254,34 @@ class RLTrader:
             self.logger.error(f"❌ Erro gerando sinal RL: {e}")
             return {'action': 'hold', 'type': 'RL_ERROR', 'strength': 0.1}
 
-    def update_with_result(self, state: np.ndarray, action: int, 
-                         next_state: np.ndarray, reward: float, done: bool = False):
+    def update_with_result(self, state: np.ndarray, action: int, pnl: float,
+                         next_state: np.ndarray, market_conditions: Dict,
+                         holding_period: float = 1.0, done: bool = False):
         """Atualiza o modelo com resultado do trade"""
         if not self.enable_training:
             return
             
-        self.remember(state, action, reward, next_state, done)
-        self.replay()
-        
-        # Atualiza target model periodicamente
-        if len(self.memory) % 100 == 0:
-            self.update_target_model()
+        try:
+            # Calcula recompensa
+            reward = self.calculate_reward(action, pnl, market_conditions, holding_period)
+            
+            # Armazena experiência
+            self.remember(state, action, reward, next_state, done)
+            
+            # Treina o modelo
+            self.replay()
+            
+            # Atualiza target model periodicamente
+            if len(self.memory) % 100 == 0:
+                self.update_target_model()
+                
+            # Log de treinamento
+            if len(self.memory) % 50 == 0:
+                self.logger.info(f"🧠 RL Training: Memory={len(self.memory)}, "
+                               f"ε={self.epsilon:.3f}, Last Reward={reward:.3f}")
+                               
+        except Exception as e:
+            self.logger.error(f"❌ Erro atualizando RL: {e}")
 
     def save_model(self, filepath: str = 'rl_trader_model.h5'):
         """Salva o modelo treinado"""
@@ -228,7 +295,7 @@ class RLTrader:
         """Carrega modelo treinado"""
         try:
             self.model = tf.keras.models.load_model(filepath)
-            self.epsilon = self.epsilon_min  # Minimiza exploração
+            self.epsilon = self.epsilon_min  # Minimiza exploração após carregar
             self.logger.info(f"📂 Modelo RL carregado: {filepath}")
         except Exception as e:
             self.logger.warning(f"⚠️  Não foi possível carregar modelo: {e}")
@@ -240,56 +307,6 @@ class RLTrader:
             'memory_size': len(self.memory),
             'episode_count': len(self.episode_rewards),
             'avg_reward': np.mean(self.episode_rewards) if self.episode_rewards else 0,
-            'model_updated': len(self.memory) >= self.batch_size
+            'model_updated': len(self.memory) >= self.batch_size,
+            'exploration_rate': self.epsilon
         }
-
-
-# Integração com o Risk Manager existente
-class RLEnhancedRiskManager(RiskManager):
-    def __init__(self, config):
-        super().__init__(config)
-        self.rl_trader = RLTrader(enable_training=True)
-        self.portfolio_state = {}
-        
-    async def execute_trade(self, market, signal, trader):
-        """Executa trade com suporte do RL"""
-        try:
-            # Atualiza estado do portfólio
-            await self._update_portfolio_state(trader)
-            
-            # Obtém sinal do RL
-            rl_signal = await self.rl_trader.get_trading_signal(
-                market_data=market,
-                portfolio=self.portfolio_state,
-                symbol=market['symbol']
-            )
-            
-            # Combina sinais (RL tem prioridade)
-            if rl_signal['action'] != 'hold' and rl_signal['strength'] > 0.7:
-                final_signal = rl_signal
-                self.logger.info(f"🤖 Usando sinal RL: {final_signal['action']}")
-            else:
-                final_signal = signal
-                self.logger.info(f"📊 Usando sinal tradicional: {final_signal['action']}")
-            
-            # Executa trade normalmente
-            return await super().execute_trade(market, final_signal, trader)
-            
-        except Exception as e:
-            self.logger.error(f"❌ Erro no RL Enhanced Risk Manager: {e}")
-            return await super().execute_trade(market, signal, trader)
-    
-    async def _update_portfolio_state(self, trader):
-        """Atualiza estado do portfólio para o RL"""
-        try:
-            balance = await trader.get_account_balance()
-            total_value = sum(balance.values())
-            
-            self.portfolio_state = {
-                'cash_ratio': balance.get('USDT', 0) / max(total_value, 1),
-                'position_size': len(self.open_positions),
-                'current_pnl': self.daily_pnl,
-                'total_trades': self.total_trades
-            }
-        except Exception as e:
-            self.logger.error(f"❌ Erro atualizando estado do portfólio: {e}")
